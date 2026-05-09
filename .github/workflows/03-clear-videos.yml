@@ -1,0 +1,40 @@
+name: 02- 🗑 Clean Videos folder
+
+on:
+  workflow_dispatch:
+    inputs:
+      warning:
+        description: '⚠️ WARNING: This will DELETE the entire videos/ folder and recreate it. Click "Run workflow" only if you are sure.'
+        required: false
+        default: 'Read this warning before proceeding'
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Remove videos folder, recreate it and add README.md
+        run: |
+          rm -rf videos
+          mkdir videos
+          echo "this folder is empty. start using with actions" > videos/README.md
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add videos
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "[AVASAM] Clean videos folder (recreated with README.md) [skip ci]"
+            git pull --rebase origin "${{ github.ref_name }}"
+            git push origin HEAD:"${{ github.ref_name }}"
+            echo "✅ videos folder cleaned and README.md added"
+          fi
