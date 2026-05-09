@@ -1,186 +1,234 @@
-name: 🌐 Web Proxy Server
+name: 🎮 Interactive Web Controller
 
 on:
   workflow_dispatch:
     inputs:
-      port:
-        description: 'Port to run proxy'
+      url:
+        description: 'Target URL'
+        required: true
+        default: 'https://deepseek.com'
+        type: string
+      actions:
+        description: 'Actions to perform (click, type, scroll, screenshot, wait)'
         required: false
-        default: '8080'
+        default: 'wait:3;screenshot;scroll:500;click:.button;screenshot'
         type: string
 
 jobs:
-  proxy:
+  interact:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 ساعت حداکثر
+    timeout-minutes: 30
     
     steps:
-      - name: Setup Python Proxy
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install Puppeteer
         run: |
-          cat > proxy.py << 'EOF'
-import http.server
-import socketserver
-import urllib.request
-import urllib.parse
-import sys
-
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-
-class ProxyHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        try:
-            # Parse URL from path
-            url = self.path[1:]  # Remove leading /
-            
-            if not url.startswith('http'):
-                # Return HTML interface
-                self.send_response(200)
-                self.send_header('Content-type', 'text/html')
-                self.end_headers()
-                
-                html = '''
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>GitHub Actions Proxy</title>
-                    <style>
-                        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
-                        input, button { padding: 10px; margin: 5px; width: 80%; }
-                        .status { color: green; }
-                    </style>
-                </head>
-                <body>
-                    <h1>🌐 GitHub Actions Proxy</h1>
-                    <p class="status">✅ Proxy is running on GitHub Actions!</p>
-                    <input type="text" id="url" placeholder="Enter URL to fetch...">
-                    <button onclick="fetchURL()">Fetch</button>
-                    <div id="result"></div>
-                    
-                    <script>
-                    async function fetchURL() {
-                        let url = document.getElementById('url').value;
-                        let result = document.getElementById('result');
-                        result.innerHTML = 'Loading...';
-                        
-                        try {
-                            let response = await fetch('/' + url);
-                            let text = await response.text();
-                            result.innerHTML = '<pre>' + text + '</pre>';
-                        } catch(e) {
-                            result.innerHTML = 'Error: ' + e.message;
-                        }
-                    }
-                    </script>
-                    
-                    <hr>
-                    <p>Usage: <code>https://your-domain/&lt;URL&gt;</code></p>
-                    <p>Example: <a href="/https://example.com">/https://example.com</a></p>
-                    
-                    <p><small>Powered by GitHub Actions | AVASAM.ir</small></p>
-                </body>
-                </html>
-                '''
-                self.wfile.write(html.encode())
-                return
-            
-            # Fetch the actual URL
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                content = response.read()
-                
-                self.send_response(200)
-                self.send_header('Content-type', response.headers.get('Content-type', 'text/plain'))
-                self.end_headers()
-                self.wfile.write(content)
-                
-        except Exception as e:
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(str(e).encode())
-    
-    def do_POST(self):
-        self.do_GET()
-
-if __name__ == '__main__':
-    with socketserver.TCPServer(("", PORT), ProxyHandler) as httpd:
-        print(f"🌐 Proxy running on port {PORT}")
-        print(f"📍 Access via: http://localhost:{PORT}")
-        httpd.serve_forever()
-EOF
+          npm install puppeteer
+          npx puppeteer browsers install chrome
           
-          python3 proxy.py ${{ github.event.inputs.port }} &
-          
-          # Save port for next steps
-          echo "PROXY_PORT=${{ github.event.inputs.port }}" >> $GITHUB_ENV
-          
-          # Keep proxy running
-          sleep 5
-          echo "✅ Proxy started on port ${{ github.event.inputs.port }}"
-          
-      - name: Create Tunnel with ngrok (Option 1)
+      - name: Interactive Browser Session
         run: |
-          # Download ngrok
-          wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
-          tar xzf ngrok-v3-stable-linux-amd64.tgz
+          cat > interact.js << 'EOF'
+          const puppeteer = require('puppeteer');
           
-          # You need to add your ngrok auth token as secret
-          # Get it from https://dashboard.ngrok.com/auth
-          if [ -n "${{ secrets.NGROK_TOKEN }}" ]; then
-            ./ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
-            ./ngrok http ${{ env.PROXY_PORT }} --log=stdout &
-            sleep 5
-            
-            # Get public URL
-            curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url'
-            echo "✅ ngrok tunnel created"
-          else
-            echo "⚠️ NGROK_TOKEN not set. Using localhost only"
-          fi
+          const url = process.env.URL;
+          const actionsStr = process.env.ACTIONS;
           
-      - name: Create Tunnel with Cloudflare (Option 2)
+          async function parseActions(actionsStr) {
+              const actions = [];
+              const parts = actionsStr.split(';');
+              
+              for (const part of parts) {
+                  if (part.startsWith('wait:')) {
+                      const seconds = parseInt(part.split(':')[1]);
+                      actions.push({ type: 'wait', duration: seconds });
+                  }
+                  else if (part.startsWith('scroll:')) {
+                      const pixels = parseInt(part.split(':')[1]);
+                      actions.push({ type: 'scroll', y: pixels });
+                  }
+                  else if (part.startsWith('click:')) {
+                      const selector = part.substring(6);
+                      actions.push({ type: 'click', selector });
+                  }
+                  else if (part.startsWith('type:')) {
+                      const [_, text] = part.split(':');
+                      actions.push({ type: 'type', text });
+                  }
+                  else if (part.startsWith('press:')) {
+                      const key = part.split(':')[1];
+                      actions.push({ type: 'press', key });
+                  }
+                  else if (part === 'screenshot') {
+                      actions.push({ type: 'screenshot' });
+                  }
+                  else if (part === 'fullpage') {
+                      actions.push({ type: 'fullpage' });
+                  }
+                  else if (part.startsWith('evaluate:')) {
+                      const code = part.substring(9);
+                      actions.push({ type: 'evaluate', code });
+                  }
+              }
+              return actions;
+          }
+          
+          async function performAction(page, action, stepNum) {
+              console.log(`  🎬 Step ${stepNum}: ${action.type}`);
+              
+              switch (action.type) {
+                  case 'wait':
+                      console.log(`     ⏳ Waiting ${action.duration}s...`);
+                      await page.waitForTimeout(action.duration * 1000);
+                      break;
+                      
+                  case 'scroll':
+                      console.log(`     📜 Scrolling ${action.y}px`);
+                      await page.evaluate((y) => window.scrollBy(0, y), action.y);
+                      break;
+                      
+                  case 'click':
+                      console.log(`     🖱️ Clicking: ${action.selector}`);
+                      try {
+                          await page.waitForSelector(action.selector, { timeout: 5000 });
+                          await page.click(action.selector);
+                          console.log(`     ✅ Clicked successfully`);
+                      } catch(e) {
+                          console.log(`     ❌ Selector not found: ${action.selector}`);
+                      }
+                      break;
+                      
+                  case 'type':
+                      console.log(`     ⌨️ Typing: ${action.text}`);
+                      await page.keyboard.type(action.text);
+                      break;
+                      
+                  case 'press':
+                      console.log(`     ⌨️ Pressing key: ${action.key}`);
+                      await page.keyboard.press(action.key);
+                      break;
+                      
+                  case 'screenshot':
+                      const filename = `screenshot_${Date.now()}.png`;
+                      await page.screenshot({ path: filename, fullPage: false });
+                      console.log(`     📸 Screenshot saved: ${filename}`);
+                      break;
+                      
+                  case 'fullpage':
+                      const fullFilename = `fullpage_${Date.now()}.png`;
+                      await page.screenshot({ path: fullFilename, fullPage: true });
+                      console.log(`     📸 Full page screenshot: ${fullFilename}`);
+                      break;
+                      
+                  case 'evaluate':
+                      console.log(`     🔧 Executing: ${action.code.substring(0, 50)}...`);
+                      const result = await page.evaluate(action.code);
+                      console.log(`     📊 Result: ${result}`);
+                      break;
+              }
+          }
+          
+          async function main() {
+              console.log('🚀 Launching browser...');
+              const browser = await puppeteer.launch({
+                  headless: true,
+                  args: ['--no-sandbox', '--disable-setuid-sandbox']
+              });
+              
+              const page = await browser.newPage();
+              
+              // Set viewport
+              await page.setViewport({ width: 1280, height: 800 });
+              
+              console.log(`🌐 Navigating to: ${url}`);
+              await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+              console.log('✅ Page loaded');
+              
+              // Save initial HTML
+              const html = await page.content();
+              require('fs').writeFileSync('initial_page.html', html);
+              console.log('📄 Initial HTML saved');
+              
+              // Parse and perform actions
+              const actions = await parseActions(actionsStr);
+              console.log(`\n📋 Total actions: ${actions.length}\n`);
+              
+              for (let i = 0; i < actions.length; i++) {
+                  await performAction(page, actions[i], i + 1);
+                  await page.waitForTimeout(500); // Small delay between actions
+              }
+              
+              // Save final state
+              const finalHtml = await page.content();
+              require('fs').writeFileSync('final_page.html', finalHtml);
+              console.log('\n📄 Final HTML saved');
+              
+              // Save console logs
+              page.on('console', msg => console.log('🌐 Console:', msg.text()));
+              
+              // Extract all links after interactions
+              const links = await page.evaluate(() => {
+                  return Array.from(document.querySelectorAll('a')).map(a => a.href);
+              });
+              require('fs').writeFileSync('extracted_links.json', JSON.stringify(links, null, 2));
+              console.log(`🔗 Extracted ${links.length} links`);
+              
+              // Take final screenshot
+              await page.screenshot({ path: 'final_screenshot.png', fullPage: true });
+              console.log('📸 Final screenshot saved');
+              
+              await browser.close();
+              console.log('\n✅ Session completed successfully!');
+          }
+          
+          main().catch(console.error);
+          EOF
+          
+          export URL="${{ github.event.inputs.url }}"
+          export ACTIONS="${{ github.event.inputs.actions }}"
+          
+          node interact.js
+          
+      - name: Save Results
         run: |
-          # Download cloudflared
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared-linux-amd64
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          FOLDER="interactions/${TIMESTAMP}"
+          mkdir -p "$FOLDER"
           
-          # Create tunnel
-          ./cloudflared-linux-amd64 tunnel --url http://localhost:${{ env.PROXY_PORT }} &
-          sleep 5
+          # Move all generated files
+          mv *.png *.html *.json "$FOLDER/" 2>/dev/null || true
           
-          echo "✅ Cloudflare tunnel created"
-          echo "📝 Check the logs above for the public URL"
+          # Create report
+          cat > "$FOLDER/report.md" << EOF
+          # 🎮 Interaction Report
           
-      - name: Display Access URLs
+          **URL:** ${{ github.event.inputs.url }}
+          **Time:** $(date)
+          **Actions:** ${{ github.event.inputs.actions }}
+          
+          ## Files Generated:
+          - [Initial HTML](./initial_page.html)
+          - [Final HTML](./final_page.html)
+          - [Final Screenshot](./final_screenshot.png)
+          - [Extracted Links](./extracted_links.json)
+          
+          ## Page Information:
+          EOF
+          
+          echo "✅ Results saved to: $FOLDER"
+          
+      - name: Commit Results
         run: |
-          echo ""
-          echo "========================================="
-          echo "🌐 PROXY IS RUNNING!"
-          echo "========================================="
-          echo ""
-          echo "📍 Local URL: http://localhost:${{ env.PROXY_PORT }}"
-          echo ""
-          echo "To access from anywhere, use one of these:"
-          echo "1. GitHub Codespaces:"
-          echo "   - Create codespace from this repo"
-          echo "   - Forward port ${{ env.PROXY_PORT }}"
-          echo ""
-          echo "2. GitHub Tunnel (if using ngrok/cloudflare):"
-          echo "   - Check logs above for public URL"
-          echo ""
-          echo "Usage examples:"
-          echo "  - http://localhost:${{ env.PROXY_PORT }}/https://example.com"
-          echo "  - http://localhost:${{ env.PROXY_PORT }}/https://raw.githubusercontent.com/user/repo/main/file.txt"
-          echo ""
-          echo "========================================="
-          
-      - name: Keep Proxy Running
-        run: |
-          echo "🔄 Proxy will run for 6 hours max..."
-          echo "Press Ctrl+C to stop"
-          echo ""
-          
-          # Keep the workflow alive
-          while true; do
-            sleep 60
-            echo "⏰ Proxy still running - $(date '+%H:%M:%S')"
-          done
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add interactions/
+          git diff --cached --quiet || {
+              git commit -m "[AVASAM] Interactive session: ${{ github.event.inputs.url }} [skip ci]"
+              git push
+          }
