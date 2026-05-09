@@ -1,0 +1,186 @@
+name: 🌐 Web Proxy Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      port:
+        description: 'Port to run proxy'
+        required: false
+        default: '8080'
+        type: string
+
+jobs:
+  proxy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 ساعت حداکثر
+    
+    steps:
+      - name: Setup Python Proxy
+        run: |
+          cat > proxy.py << 'EOF'
+import http.server
+import socketserver
+import urllib.request
+import urllib.parse
+import sys
+
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+
+class ProxyHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            # Parse URL from path
+            url = self.path[1:]  # Remove leading /
+            
+            if not url.startswith('http'):
+                # Return HTML interface
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                
+                html = '''
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>GitHub Actions Proxy</title>
+                    <style>
+                        body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
+                        input, button { padding: 10px; margin: 5px; width: 80%; }
+                        .status { color: green; }
+                    </style>
+                </head>
+                <body>
+                    <h1>🌐 GitHub Actions Proxy</h1>
+                    <p class="status">✅ Proxy is running on GitHub Actions!</p>
+                    <input type="text" id="url" placeholder="Enter URL to fetch...">
+                    <button onclick="fetchURL()">Fetch</button>
+                    <div id="result"></div>
+                    
+                    <script>
+                    async function fetchURL() {
+                        let url = document.getElementById('url').value;
+                        let result = document.getElementById('result');
+                        result.innerHTML = 'Loading...';
+                        
+                        try {
+                            let response = await fetch('/' + url);
+                            let text = await response.text();
+                            result.innerHTML = '<pre>' + text + '</pre>';
+                        } catch(e) {
+                            result.innerHTML = 'Error: ' + e.message;
+                        }
+                    }
+                    </script>
+                    
+                    <hr>
+                    <p>Usage: <code>https://your-domain/&lt;URL&gt;</code></p>
+                    <p>Example: <a href="/https://example.com">/https://example.com</a></p>
+                    
+                    <p><small>Powered by GitHub Actions | AVASAM.ir</small></p>
+                </body>
+                </html>
+                '''
+                self.wfile.write(html.encode())
+                return
+            
+            # Fetch the actual URL
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                content = response.read()
+                
+                self.send_response(200)
+                self.send_header('Content-type', response.headers.get('Content-type', 'text/plain'))
+                self.end_headers()
+                self.wfile.write(content)
+                
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+    
+    def do_POST(self):
+        self.do_GET()
+
+if __name__ == '__main__':
+    with socketserver.TCPServer(("", PORT), ProxyHandler) as httpd:
+        print(f"🌐 Proxy running on port {PORT}")
+        print(f"📍 Access via: http://localhost:{PORT}")
+        httpd.serve_forever()
+EOF
+          
+          python3 proxy.py ${{ github.event.inputs.port }} &
+          
+          # Save port for next steps
+          echo "PROXY_PORT=${{ github.event.inputs.port }}" >> $GITHUB_ENV
+          
+          # Keep proxy running
+          sleep 5
+          echo "✅ Proxy started on port ${{ github.event.inputs.port }}"
+          
+      - name: Create Tunnel with ngrok (Option 1)
+        run: |
+          # Download ngrok
+          wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+          tar xzf ngrok-v3-stable-linux-amd64.tgz
+          
+          # You need to add your ngrok auth token as secret
+          # Get it from https://dashboard.ngrok.com/auth
+          if [ -n "${{ secrets.NGROK_TOKEN }}" ]; then
+            ./ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+            ./ngrok http ${{ env.PROXY_PORT }} --log=stdout &
+            sleep 5
+            
+            # Get public URL
+            curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url'
+            echo "✅ ngrok tunnel created"
+          else
+            echo "⚠️ NGROK_TOKEN not set. Using localhost only"
+          fi
+          
+      - name: Create Tunnel with Cloudflare (Option 2)
+        run: |
+          # Download cloudflared
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared-linux-amd64
+          
+          # Create tunnel
+          ./cloudflared-linux-amd64 tunnel --url http://localhost:${{ env.PROXY_PORT }} &
+          sleep 5
+          
+          echo "✅ Cloudflare tunnel created"
+          echo "📝 Check the logs above for the public URL"
+          
+      - name: Display Access URLs
+        run: |
+          echo ""
+          echo "========================================="
+          echo "🌐 PROXY IS RUNNING!"
+          echo "========================================="
+          echo ""
+          echo "📍 Local URL: http://localhost:${{ env.PROXY_PORT }}"
+          echo ""
+          echo "To access from anywhere, use one of these:"
+          echo "1. GitHub Codespaces:"
+          echo "   - Create codespace from this repo"
+          echo "   - Forward port ${{ env.PROXY_PORT }}"
+          echo ""
+          echo "2. GitHub Tunnel (if using ngrok/cloudflare):"
+          echo "   - Check logs above for public URL"
+          echo ""
+          echo "Usage examples:"
+          echo "  - http://localhost:${{ env.PROXY_PORT }}/https://example.com"
+          echo "  - http://localhost:${{ env.PROXY_PORT }}/https://raw.githubusercontent.com/user/repo/main/file.txt"
+          echo ""
+          echo "========================================="
+          
+      - name: Keep Proxy Running
+        run: |
+          echo "🔄 Proxy will run for 6 hours max..."
+          echo "Press Ctrl+C to stop"
+          echo ""
+          
+          # Keep the workflow alive
+          while true; do
+            sleep 60
+            echo "⏰ Proxy still running - $(date '+%H:%M:%S')"
+          done
