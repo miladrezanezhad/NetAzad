@@ -1,4 +1,4 @@
-name: 🎮 Interactive Web Controller
+name: 🎮 Interactive Web Controller (Fixed)
 
 on:
   workflow_dispatch:
@@ -9,9 +9,9 @@ on:
         default: 'https://deepseek.com'
         type: string
       actions:
-        description: 'Actions to perform (click, type, scroll, screenshot, wait)'
+        description: 'Actions: wait(3)|click(#id)|type(text)|scroll(500)|screenshot'
         required: false
-        default: 'wait:3;screenshot;scroll:500;click:.button;screenshot'
+        default: 'wait:3;screenshot;scroll:500;screenshot'
         type: string
 
 jobs:
@@ -30,21 +30,26 @@ jobs:
       - name: Install Puppeteer
         run: |
           npm install puppeteer
-          npx puppeteer browsers install chrome
           
       - name: Interactive Browser Session
         run: |
           cat > interact.js << 'EOF'
           const puppeteer = require('puppeteer');
+          const fs = require('fs');
           
           const url = process.env.URL;
           const actionsStr = process.env.ACTIONS;
+          
+          // Helper function for waiting
+          const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
           
           async function parseActions(actionsStr) {
               const actions = [];
               const parts = actionsStr.split(';');
               
               for (const part of parts) {
+                  if (part.trim() === '') continue;
+                  
                   if (part.startsWith('wait:')) {
                       const seconds = parseInt(part.split(':')[1]);
                       actions.push({ type: 'wait', duration: seconds });
@@ -58,7 +63,7 @@ jobs:
                       actions.push({ type: 'click', selector });
                   }
                   else if (part.startsWith('type:')) {
-                      const [_, text] = part.split(':');
+                      const text = part.substring(5);
                       actions.push({ type: 'type', text });
                   }
                   else if (part.startsWith('press:')) {
@@ -84,8 +89,8 @@ jobs:
               
               switch (action.type) {
                   case 'wait':
-                      console.log(`     ⏳ Waiting ${action.duration}s...`);
-                      await page.waitForTimeout(action.duration * 1000);
+                      console.log(`     ⏳ Waiting ${action.duration} seconds...`);
+                      await wait(action.duration * 1000);
                       break;
                       
                   case 'scroll':
@@ -101,6 +106,7 @@ jobs:
                           console.log(`     ✅ Clicked successfully`);
                       } catch(e) {
                           console.log(`     ❌ Selector not found: ${action.selector}`);
+                          console.log(`     Error: ${e.message}`);
                       }
                       break;
                       
@@ -115,21 +121,27 @@ jobs:
                       break;
                       
                   case 'screenshot':
-                      const filename = `screenshot_${Date.now()}.png`;
+                      const timestamp = Date.now();
+                      const filename = `screenshot_${timestamp}.png`;
                       await page.screenshot({ path: filename, fullPage: false });
                       console.log(`     📸 Screenshot saved: ${filename}`);
                       break;
                       
                   case 'fullpage':
-                      const fullFilename = `fullpage_${Date.now()}.png`;
+                      const fullTimestamp = Date.now();
+                      const fullFilename = `fullpage_${fullTimestamp}.png`;
                       await page.screenshot({ path: fullFilename, fullPage: true });
                       console.log(`     📸 Full page screenshot: ${fullFilename}`);
                       break;
                       
                   case 'evaluate':
-                      console.log(`     🔧 Executing: ${action.code.substring(0, 50)}...`);
-                      const result = await page.evaluate(action.code);
-                      console.log(`     📊 Result: ${result}`);
+                      console.log(`     🔧 Executing JavaScript...`);
+                      try {
+                          const result = await page.evaluate(action.code);
+                          console.log(`     📊 Result: ${result}`);
+                      } catch(e) {
+                          console.log(`     ❌ Error: ${e.message}`);
+                      }
                       break;
               }
           }
@@ -137,8 +149,14 @@ jobs:
           async function main() {
               console.log('🚀 Launching browser...');
               const browser = await puppeteer.launch({
-                  headless: true,
-                  args: ['--no-sandbox', '--disable-setuid-sandbox']
+                  headless: "new",
+                  args: [
+                      '--no-sandbox',
+                      '--disable-setuid-sandbox',
+                      '--disable-dev-shm-usage',
+                      '--disable-accelerated-2d-canvas',
+                      '--disable-gpu'
+                  ]
               });
               
               const page = await browser.newPage();
@@ -149,11 +167,12 @@ jobs:
               console.log(`🌐 Navigating to: ${url}`);
               await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
               console.log('✅ Page loaded');
+              console.log(`📄 Page title: ${await page.title()}`);
               
               // Save initial HTML
               const html = await page.content();
-              require('fs').writeFileSync('initial_page.html', html);
-              console.log('📄 Initial HTML saved');
+              fs.writeFileSync('initial_page.html', html);
+              console.log('💾 Initial HTML saved');
               
               // Parse and perform actions
               const actions = await parseActions(actionsStr);
@@ -161,33 +180,53 @@ jobs:
               
               for (let i = 0; i < actions.length; i++) {
                   await performAction(page, actions[i], i + 1);
-                  await page.waitForTimeout(500); // Small delay between actions
+                  await wait(500); // Small delay between actions
               }
               
               // Save final state
               const finalHtml = await page.content();
-              require('fs').writeFileSync('final_page.html', finalHtml);
-              console.log('\n📄 Final HTML saved');
-              
-              // Save console logs
-              page.on('console', msg => console.log('🌐 Console:', msg.text()));
+              fs.writeFileSync('final_page.html', finalHtml);
+              console.log('\n💾 Final HTML saved');
               
               // Extract all links after interactions
               const links = await page.evaluate(() => {
-                  return Array.from(document.querySelectorAll('a')).map(a => a.href);
+                  return Array.from(document.querySelectorAll('a')).map(a => ({
+                      text: a.innerText,
+                      href: a.href
+                  }));
               });
-              require('fs').writeFileSync('extracted_links.json', JSON.stringify(links, null, 2));
+              fs.writeFileSync('extracted_links.json', JSON.stringify(links, null, 2));
               console.log(`🔗 Extracted ${links.length} links`);
               
               // Take final screenshot
               await page.screenshot({ path: 'final_screenshot.png', fullPage: true });
-              console.log('📸 Final screenshot saved');
+              console.log('📸 Final full-page screenshot saved');
+              
+              // Get page metrics
+              const metrics = await page.evaluate(() => ({
+                  title: document.title,
+                  url: window.location.href,
+                  linksCount: document.querySelectorAll('a').length,
+                  imagesCount: document.querySelectorAll('img').length,
+                  buttonsCount: document.querySelectorAll('button').length,
+                  formsCount: document.querySelectorAll('form').length
+              }));
+              
+              console.log('\n📊 Page Statistics:');
+              console.log(`   Title: ${metrics.title}`);
+              console.log(`   Links: ${metrics.linksCount}`);
+              console.log(`   Images: ${metrics.imagesCount}`);
+              console.log(`   Buttons: ${metrics.buttonsCount}`);
+              console.log(`   Forms: ${metrics.formsCount}`);
               
               await browser.close();
               console.log('\n✅ Session completed successfully!');
           }
           
-          main().catch(console.error);
+          main().catch(error => {
+              console.error('❌ Fatal error:', error);
+              process.exit(1);
+          });
           EOF
           
           export URL="${{ github.event.inputs.url }}"
@@ -218,7 +257,11 @@ jobs:
           - [Final Screenshot](./final_screenshot.png)
           - [Extracted Links](./extracted_links.json)
           
-          ## Page Information:
+          ## Page Statistics:
+          $(cat "$FOLDER/extracted_links.json" | head -20 || echo "N/A")
+          
+          ---
+          *AVASAM Interactive Browser - https://avasam.ir*
           EOF
           
           echo "✅ Results saved to: $FOLDER"
@@ -231,4 +274,5 @@ jobs:
           git diff --cached --quiet || {
               git commit -m "[AVASAM] Interactive session: ${{ github.event.inputs.url }} [skip ci]"
               git push
+              echo "✅ Results pushed to GitHub"
           }
