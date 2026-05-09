@@ -1,0 +1,219 @@
+name: 🌐 4-Browse the Web
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL to visit'
+        required: true
+        type: string
+
+jobs:
+  browse:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl zip
+
+      - name: Setup Node and Puppeteer
+        run: |
+          npm init -y
+          npm install puppeteer
+
+      - name: Create screenshot script
+        run: |
+          cat > screenshot.js << 'ENDOFSCRIPT'
+          const puppeteer = require('puppeteer');
+          const url = process.argv[2];
+          const outputPath = process.argv[3];
+
+          (async () => {
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            });
+            const page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 720 });
+            
+            try {
+              await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+              await page.screenshot({ path: outputPath, fullPage: true });
+              console.log('Screenshot saved successfully');
+            } catch (err) {
+              console.error('Screenshot error:', err.message);
+              process.exit(1);
+            } finally {
+              await browser.close();
+            }
+          })();
+          ENDOFSCRIPT
+
+      - name: Visit URL and download media
+        run: |
+          RAW_URL="${{ github.event.inputs.url }}"
+          
+          # Normalize URL: try HTTPS first if no protocol given
+          if [[ ! "$RAW_URL" =~ ^https?:// ]]; then
+            HTTPS_URL="https://$RAW_URL"
+            HTTP_URL="http://$RAW_URL"
+            
+            echo "Trying HTTPS: $HTTPS_URL"
+            if curl -L --connect-timeout 10 --max-time 30 -o /dev/null -s -w "%{http_code}" "$HTTPS_URL" | grep -q "200\|301\|302\|303\|307\|308"; then
+              URL="$HTTPS_URL"
+              echo "HTTPS works, using $URL"
+            else
+              echo "HTTPS failed, falling back to HTTP"
+              URL="$HTTP_URL"
+            fi
+          else
+            URL="$RAW_URL"
+          fi
+          
+          echo "Visiting $URL"
+
+          # Extract domain (remove protocol and optional www)
+          DOMAIN=$(echo "$URL" | awk -F/ '{print $3}' | sed 's/^www\.//')
+          
+          SLUG=$(echo "$URL" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-100)
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          FOLDER="pages/$DOMAIN/$SLUG/$TIMESTAMP"
+          MEDIA_FOLDER="$FOLDER/media"
+          mkdir -p "$FOLDER" "$MEDIA_FOLDER"
+
+          # Download HTML
+          echo "Downloading page HTML..."
+          curl -L -A "Mozilla/5.0" -o "$FOLDER/page.html" "$URL"
+
+          # Take screenshot
+          echo "Taking screenshot..."
+          node screenshot.js "$URL" "$FOLDER/screenshot.png" && SCREENSHOT_OK=true || SCREENSHOT_OK=false
+
+          # Extract links
+          grep -oP 'href="\K[^"]*' "$FOLDER/page.html" | sort -u > "$FOLDER/all_links.txt"
+          grep -oP 'src="\K[^"]*' "$FOLDER/page.html" | sort -u >> "$FOLDER/all_links.txt"
+          sort -u "$FOLDER/all_links.txt" -o "$FOLDER/all_links.txt"
+
+          # Media types to download
+          MEDIA_EXT="png|jpg|jpeg|gif|svg|webp|bmp|ico|mp3|wav|ogg|flac|aac|mp4|webm|avi|mov|mkv|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|tar|gz|7z"
+
+          > "$FOLDER/media_links.txt"
+          > "$FOLDER/other_links.txt"
+          > "$FOLDER/downloaded_media.md"
+          echo "## Downloaded Media Files" > "$FOLDER/downloaded_media.md"
+          echo "" >> "$FOLDER/downloaded_media.md"
+
+          # Base URL for resolving relative links
+          BASE_URL="${URL%%/*}"
+          BASE_DOMAIN=$(echo "$URL" | awk -F/ '{print $3}')
+
+          while IFS= read -r link; do
+            [ -z "$link" ] && continue
+            
+            if [[ "$link" = /* ]]; then
+              ABSOLUTE_URL="${BASE_URL}${link}"
+            elif [[ "$link" =~ ^https?:// ]]; then
+              ABSOLUTE_URL="$link"
+            else
+              ABSOLUTE_URL="${BASE_URL}/${link}"
+            fi
+
+            ext="${link##*.}"
+            ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+            if echo "$ext_lower" | grep -Eq "^($MEDIA_EXT)$"; then
+              echo "Downloading: $ABSOLUTE_URL"
+              FILENAME=$(basename "$link" | sed 's/[?#].*//')
+              [ -f "$MEDIA_FOLDER/$FILENAME" ] && FILENAME="$(date +%s)_$FILENAME"
+              
+              curl -L --retry 2 --max-time 60 -o "$MEDIA_FOLDER/$FILENAME" "$ABSOLUTE_URL" 2>/dev/null && {
+                FILE_SIZE=$(stat -c%s "$MEDIA_FOLDER/$FILENAME" 2>/dev/null || echo 0)
+                if [ "$FILE_SIZE" -gt 0 ]; then
+                  echo "$link" >> "$FOLDER/media_links.txt"
+                  if [[ "$ext_lower" =~ ^(png|jpg|jpeg|gif|svg|webp)$ ]]; then
+                    echo "![$FILENAME](./media/$FILENAME)" >> "$FOLDER/downloaded_media.md"
+                  else
+                    echo "- [$FILENAME](./media/$FILENAME) ($(( FILE_SIZE / 1024 )) KB)" >> "$FOLDER/downloaded_media.md"
+                  fi
+                  echo "OK: $FILENAME"
+                fi
+              } || echo "Failed: $ABSOLUTE_URL"
+            else
+              echo "$link" >> "$FOLDER/other_links.txt"
+            fi
+          done < "$FOLDER/all_links.txt"
+
+          # Build index.md
+          MEDIA_COUNT=$(find "$MEDIA_FOLDER" -type f 2>/dev/null | wc -l)
+          {
+            echo "# Visited: $URL"
+            echo "**Time:** $(date)"
+            echo ""
+            if [ "$SCREENSHOT_OK" = true ] && [ -f "$FOLDER/screenshot.png" ]; then
+              echo "## Screenshot"
+              echo "![Screenshot](./screenshot.png)"
+              echo ""
+            fi
+            echo "## Raw HTML"
+            echo "[page.html](./page.html)"
+            echo ""
+            echo "## Downloaded Media ($MEDIA_COUNT files)"
+            if [ "$MEDIA_COUNT" -gt 0 ]; then
+              cat "$FOLDER/downloaded_media.md"
+            else
+              echo "_No media files downloaded_"
+            fi
+            echo ""
+            echo "## Other Links"
+            if [ -s "$FOLDER/other_links.txt" ]; then
+              head -50 "$FOLDER/other_links.txt" | while read -r link; do
+                echo "- [$link]($link)"
+              done
+            fi
+            echo ""
+            echo "## Stats"
+            echo "- Links: $(wc -l < "$FOLDER/all_links.txt")"
+            echo "- Media: $MEDIA_COUNT"
+          } > "$FOLDER/index.md"
+
+          # Update history in browse.md (instead of README.md)
+          BROWSE_FILE="browse.md"
+          if [ ! -f "$BROWSE_FILE" ]; then
+            echo "# Browsed Websites" > "$BROWSE_FILE"
+            echo "" >> "$BROWSE_FILE"
+          fi
+          # Add relative link to the index.md file
+          echo "- [${SLUG} (${TIMESTAMP})]($FOLDER/index.md) — $MEDIA_COUNT media files" >> "$BROWSE_FILE"
+
+          # Save variables for zip step
+          echo "DOMAIN=$DOMAIN" >> $GITHUB_ENV
+          echo "SLUG=$SLUG" >> $GITHUB_ENV
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+
+          echo "Done: $MEDIA_COUNT files downloaded"
+
+      - name: Create zip archive of the timestamp folder
+        run: |
+          cd pages/$DOMAIN/$SLUG
+          zip -r "$TIMESTAMP.zip" "$TIMESTAMP"
+          cd ../../..
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add pages/ browse.md
+          if git diff --staged --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git commit -m "Saved page with media and screenshot [skip ci]"
+          git pull --rebase
+          git push
