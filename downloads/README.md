@@ -5,6 +5,7 @@
 - [5697ac72-4127-43ab-ad41-33f24cb3b20e](./5697ac72-4127-43ab-ad41-33f24cb3b20e)
 - [Antigravity](./Antigravity)
 - [ffmpeg-release-full](./ffmpeg-release-full)
+- [w64devkit-x64-2.8.0.7z](./w64devkit-x64-2.8.0.7z)
 
 ---
 
